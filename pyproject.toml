@@ -1,0 +1,145 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "contextgraph"
+version = "0.1.0"
+description = "A governed, bi-temporal knowledge graph for agent memory, on Postgres and pgvector."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "contextgraph contributors" }]
+keywords = [
+    "knowledge-graph",
+    "rag",
+    "agent-memory",
+    "pgvector",
+    "postgres",
+    "llm",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+
+# Postgres, an async driver, the vector type, and validation. Nothing else is
+# required to run the pipeline: every model provider enters through a Protocol
+# in contextgraph.protocols, so no SDK is a hard dependency of the graph.
+dependencies = [
+    # [asyncio] pulls greenlet, which SQLAlchemy's async engine requires at
+    # runtime but does not install on its own — the failure is a ValueError deep
+    # inside the first await, not an ImportError at startup.
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.29",
+    "pgvector>=0.2.5",
+    "pydantic>=2",
+]
+
+[project.optional-dependencies]
+openai = ["openai>=1.0"]
+# langchain-anthropic supplies the structured-output binding used by the
+# reference StructuredLLM; the raw SDK is still needed for token usage, which
+# the structured wrapper alone does not surface (see protocols.StructuredLLM).
+anthropic = ["anthropic>=0.40", "langchain-anthropic>=0.3"]
+mcp = ["mcp>=1.0"]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    # Migrations ship with the package but are applied by the host, so alembic
+    # is a development/CI tool here rather than a runtime dependency.
+    "alembic>=1.13",
+]
+all = ["contextgraph[anthropic,mcp,openai]"]
+
+[project.scripts]
+contextgraph-mcp = "contextgraph.mcp.server:main"
+
+[project.urls]
+Homepage = "https://github.com/contextgraph/contextgraph"
+Repository = "https://github.com/contextgraph/contextgraph"
+Issues = "https://github.com/contextgraph/contextgraph/issues"
+Changelog = "https://github.com/contextgraph/contextgraph/blob/main/CHANGELOG.md"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/contextgraph"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/tests",
+    "/migrations",
+    "/alembic.ini",
+    "/README.md",
+    "/LICENSE",
+]
+
+[tool.ruff]
+line-length = 90
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["contextgraph"]
+
+[tool.mypy]
+python_version = "3.11"
+# src layout without relying on __init__.py placement: these two settings map
+# src/contextgraph/x.py to the module "contextgraph.x" for both `mypy src` and
+# `mypy -p contextgraph`.
+mypy_path = "src"
+explicit_package_bases = true
+namespace_packages = true
+
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_configs = true
+warn_return_any = true
+strict_equality = true
+
+# Deliberately NOT --strict. disallow_any_generics rejects the bare `type`
+# in StructuredLLM.complete's schema parameter, which is correct there: the
+# caller passes an arbitrary pydantic model class and parameterising it would
+# constrain the seam for no checking benefit.
+
+[[tool.mypy.overrides]]
+# Optional provider SDKs and untyped deps. These are installed only via extras,
+# so a base-install type check must not fail on their absence.
+module = [
+    "openai.*",
+    "langchain_openai.*",
+    "langchain_anthropic.*",
+    "langchain_core.*",
+    "mcp.*",
+    "pgvector.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+# Integration tests need a live Postgres with pgvector, so a bare `pytest` runs
+# the unit suite only. CI opts in explicitly with `pytest -m integration`; the
+# command-line -m overrides this one.
+addopts = "-m 'not integration'"
+markers = [
+    "integration: requires a live Postgres with the vector extension (DATABASE_URL)",
+]
