@@ -40,7 +40,7 @@ dependencies = [
     # [asyncio] pulls greenlet, which SQLAlchemy's async engine requires at
     # runtime but does not install on its own — the failure is a ValueError deep
     # inside the first await, not an ImportError at startup.
-    "sqlalchemy[asyncio]>=2.0",
+    "sqlalchemy[asyncio]>=2.0.51",
     "asyncpg>=0.29",
     "pgvector>=0.2.5",
     "pydantic>=2",
