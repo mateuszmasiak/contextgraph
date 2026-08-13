@@ -60,13 +60,13 @@ anthropic = ["anthropic>=0.40", "langchain-anthropic>=0.3"]
 # honest statement of what is actually supported.
 mcp = ["mcp>=1.0,<2"]
 dev = [
-    "pytest>=8",
-    "pytest-asyncio>=0.24",
-    "ruff>=0.6",
-    "mypy>=1.11",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.16.2",
+    "mypy>=2.3.0",
     # Migrations ship with the package but are applied by the host, so alembic
     # is a development/CI tool here rather than a runtime dependency.
-    "alembic>=1.13",
+    "alembic>=1.19.1",
 ]
 all = ["contextgraph[anthropic,mcp,openai]"]
 
