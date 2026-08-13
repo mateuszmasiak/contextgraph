@@ -9,7 +9,8 @@ description = "A governed, bi-temporal knowledge graph for agent memory, on Post
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-authors = [{ name = "contextgraph contributors" }]
+authors = [{ name = "Mateusz Masiak" }]
+maintainers = [{ name = "Mateusz Masiak" }]
 keywords = [
     "knowledge-graph",
     "rag",
@@ -67,22 +68,31 @@ all = ["contextgraph[anthropic,mcp,openai]"]
 contextgraph-mcp = "contextgraph.mcp.server:main"
 
 [project.urls]
-Homepage = "https://github.com/contextgraph/contextgraph"
-Repository = "https://github.com/contextgraph/contextgraph"
-Issues = "https://github.com/contextgraph/contextgraph/issues"
-Changelog = "https://github.com/contextgraph/contextgraph/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/mateuszmasiak/contextgraph"
+Repository = "https://github.com/mateuszmasiak/contextgraph"
+Issues = "https://github.com/mateuszmasiak/contextgraph/issues"
+Changelog = "https://github.com/mateuszmasiak/contextgraph/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/mateuszmasiak/contextgraph/tree/main/docs"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/contextgraph"]
 
 [tool.hatch.build.targets.sdist]
+# The sdist is what a distro packager or an auditor gets, so it carries the
+# tests and the migrations needed to actually verify the thing — not just the
+# importable package.
 include = [
     "/src",
     "/tests",
     "/migrations",
+    "/docs",
     "/alembic.ini",
     "/README.md",
     "/LICENSE",
+    "/CHANGELOG.md",
+    "/CONTRIBUTING.md",
+    "/SECURITY.md",
+    "/CODE_OF_CONDUCT.md",
 ]
 
 [tool.ruff]

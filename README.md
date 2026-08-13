@@ -1,5 +1,12 @@
 # contextgraph
 
+[![CI](https://github.com/mateuszmasiak/contextgraph/actions/workflows/ci.yml/badge.svg)](https://github.com/mateuszmasiak/contextgraph/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/contextgraph.svg)](https://pypi.org/project/contextgraph/)
+[![Python](https://img.shields.io/pypi/pyversions/contextgraph.svg)](https://pypi.org/project/contextgraph/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Checked with mypy](https://img.shields.io/badge/mypy-checked-blue.svg)](https://mypy-lang.org/)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+
 A governed, bi-temporal knowledge graph for agent memory. Postgres + pgvector — no graph database, no second datastore.
 
 Most agent memory is a pile of embedded chunks. That works until the same fact
@@ -68,9 +75,7 @@ uses its own Alembic version table, touches nothing else, and drops cleanly.
 
 ## The API
 
-Seven methods. `tenant_id` and `graph_id` are required on every call and never
-inferred from ambient state — an API that lets you forget the scope eventually
-lets you cross it.
+Six questions, plus a governance pair.
 
 | Method | What it answers |
 |---|---|
@@ -82,9 +87,20 @@ lets you cross it.
 | `conflicts(tenant, graph)` | What do we believe that can't all be true |
 | `pending` / `review` | What needs a human, and act on it |
 
-Plus `health()`, which reports the things that fail silently: nodes with no
-embedding (invisible to search and de-duplication, forever), sources stuck
-pending, changesets nobody reviewed.
+Plus `restructure()` to re-extract a stored source, and `health()`, which
+reports the things that fail silently: nodes with no embedding (invisible to
+search and de-duplication, forever), text captured while the embedder was down,
+sources stuck pending, changesets nobody reviewed.
+
+`tenant_id` and `graph_id` are required on every call and never inferred from
+ambient state — an API that lets you forget the scope eventually lets you cross
+it. Both are filtered in every scoped statement, not just `graph_id`: a
+`graph_id` is an opaque string you choose, so two tenants can pick the same one,
+and a read scoped by graph alone returns another tenant's rows with no error.
+The write path is worse — resolution decides what a claim *merges into*, so an
+unscoped candidate lookup would join two customers' graphs with a write nothing
+downstream can tell from a legitimate merge. See
+`tests/test_integration.py::TestTenantIsolation`.
 
 ## Why the roster matters
 
@@ -151,6 +167,12 @@ fabricated vector is indistinguishable from a real one once stored and silently
 corrupts every similarity decision made against it thereafter. Failing is
 recoverable — the raw source is kept and structuring re-runs.
 
+**`add()` commits twice.** The raw text lands before any remote call is made.
+That costs atomicity across the whole call and buys the library's one durability
+guarantee: past the first commit, every later failure costs derived data that
+can be rebuilt, and none of them can cost the source. An embedder outage then
+leaves stored-but-unindexed text, which `health()` counts rather than hides.
+
 **Bi-temporal, but half of it may stay inert.** Edges carry valid time and
 system time. If your facts become true when you record them, valid time equals
 system time and that is a legitimate resting state, not an unfinished one.
@@ -191,6 +213,17 @@ tenant's graph. Any scope keys appearing in tool arguments are discarded.
 reports gated operations as *awaiting review* rather than done. An agent that
 believes it wrote something it did not will confidently tell the user so.
 
+## Documentation
+
+- [Architecture](docs/architecture.md) — the pipeline, the six tables, and where
+  each decision is made
+- [Extending](docs/extending.md) — the four Protocols, custom ontologies, and
+  what every threshold means
+- [MCP server](docs/mcp.md) — running the graph as agent tools
+- [Operations](docs/operations.md) — migrations, what to alert on, cost, scaling
+- [Security](SECURITY.md) — threat model and reporting
+- [Contributing](CONTRIBUTING.md) — the five invariants a patch must not break
+
 ## Status
 
 `0.1.0`. The design is proven in production in a commercial product; this
@@ -200,6 +233,10 @@ Not yet included, in rough priority order: hybrid lexical+vector retrieval with
 RRF fusion (the highest-value addition — users search for literal names, which
 is where dense retrieval is weakest), reranking, community summarisation, and a
 conflict-resolution operation to close open questions.
+
+Contributions are welcome — [CONTRIBUTING.md](CONTRIBUTING.md) starts with the
+five invariants, because that is where a well-meaning patch is most likely to go
+wrong.
 
 ## License
 
