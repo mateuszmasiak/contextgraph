@@ -47,18 +47,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-openai = ["openai>=1.0"]
+openai = ["openai>=2.53.0"]
 # langchain-anthropic supplies the structured-output binding used by the
 # reference StructuredLLM; the raw SDK is still needed for token usage, which
 # the structured wrapper alone does not surface (see protocols.StructuredLLM).
-anthropic = ["anthropic>=0.40", "langchain-anthropic>=0.3"]
+anthropic = ["anthropic>=0.121.0", "langchain-anthropic>=1.5.4"]
 # Upper-bounded deliberately. mcp 2.0 is a rewrite, not a bump: the
 # `@server.list_tools()` / `@server.call_tool()` decorators this server is built
 # on do not exist there, and `mcp.server.fastmcp` moved. Left open, `>=1.0`
 # resolves to 2.x and `contextgraph-mcp` fails at import — a broken entry point
 # for anyone installing today. Porting is tracked; until then this pin is the
 # honest statement of what is actually supported.
-mcp = ["mcp>=1.0,<2"]
+mcp = ["mcp>=2.0.0,<3"]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
