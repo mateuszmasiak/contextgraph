@@ -215,6 +215,9 @@ believes it wrote something it did not will confidently tell the user so.
 
 ## Documentation
 
+- **[How it works](docs/how-it-works.md)** — the illustrated walkthrough: the
+  pipeline, the resolution ladder, and why cosine similarity cannot decide a
+  merge. Start here.
 - [Architecture](docs/architecture.md) — the pipeline, the six tables, and where
   each decision is made
 - [Extending](docs/extending.md) — the four Protocols, custom ontologies, and

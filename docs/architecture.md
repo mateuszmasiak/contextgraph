@@ -192,6 +192,7 @@ statements as comments.
 
 ## Further reading
 
+- [How it works](how-it-works.md) — the same material illustrated, for a first read
 - [Extending contextgraph](extending.md) — the four Protocols and the ontology
 - [MCP server](mcp.md) — running the graph as agent tools
 - [Operations](operations.md) — migrations, health, and what to alert on
