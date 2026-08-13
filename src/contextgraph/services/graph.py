@@ -80,6 +80,12 @@ class ApplyResult:
     created_edge_ids: list[str] = field(default_factory=list)
     updated_node_ids: list[str] = field(default_factory=list)
     gated_ops: list[dict[str, Any]] = field(default_factory=list)
+    # Every op, carrying the risk the SERVER computed rather than the one the
+    # caller proposed. The changeset is written from this list so that the
+    # record a reviewer later reads and the decision the gate actually made
+    # cannot disagree — if they were derived separately, a changeset could show
+    # "pending review" for an op that already applied, or hide one that didn't.
+    classified_ops: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -91,7 +97,7 @@ class Actor:
     run_id: UUID | None = None
 
 
-def compact_op(op: ResolvedOp) -> dict[str, Any]:
+def compact_op(op: ResolvedOp, *, risk: str | None = None) -> dict[str, Any]:
     """JSON-safe summary for storage in a changeset.
 
     Note the embedding is stripped: a 1536-float vector per op would bloat the
@@ -99,8 +105,11 @@ def compact_op(op: ResolvedOp) -> dict[str, Any]:
     than persisting the vector here — a node approved without an embedding is
     invisible to de-duplication forever, which is far worse than one extra
     embedding call.
+
+    ``risk`` overrides the value on the op. Callers inside ``apply`` pass the
+    server-computed classification; the op's own field is only a proposal.
     """
-    return {"op": op.op, "risk": op.risk, "payload": op.payload}
+    return {"op": op.op, "risk": risk or op.risk, "payload": op.payload}
 
 
 def classify(op_kind: str, actor: Actor) -> str:
@@ -132,12 +141,29 @@ class GraphService:
         *,
         tenant_id: str,
         graph_id: str,
+        actor: Actor | None = None,
         run_id: UUID | None = None,
     ) -> ApplyResult:
+        """Apply what may apply; gate what may not.
+
+        The risk of each op is recomputed here from the op kind and the actor.
+        ``ResolvedOp.risk`` is treated as a proposal and never as an authority:
+        if the gate honoured the field on the incoming op, anything able to
+        construct an op could mark a supersede "additive" and retire a claim
+        with no review — which is the entire thing the gate exists to prevent.
+
+        Defaulting ``actor`` to an agent is the strict reading: unattended
+        callers get the gated policy, and the permissive human path has to be
+        asked for explicitly.
+        """
+        actor = actor or Actor(kind="agent")
         result = ApplyResult()
         for op in ops:
-            if op.risk == RISK_HIGH:
-                result.gated_ops.append(compact_op(op))
+            risk = classify(op.op, actor)
+            record = compact_op(op, risk=risk)
+            result.classified_ops.append(record)
+            if risk == RISK_HIGH:
+                result.gated_ops.append(record)
                 continue
             await self._dispatch(op, tenant_id, graph_id, run_id, result)
         return result
@@ -449,12 +475,13 @@ class GraphService:
         await self.session.execute(
             text("""
                 UPDATE cg_edges SET invalid_at = NOW(), updated_at = NOW()
-                WHERE graph_id = :graph AND invalid_at IS NULL
+                WHERE tenant_id = :tenant AND graph_id = :graph
+                  AND invalid_at IS NULL
                   AND type <> 'supersedes'
                   AND (source_node_id = CAST(:id AS uuid)
                        OR target_node_id = CAST(:id AS uuid))
             """),
-            {"id": old_id, "graph": graph_id},
+            {"id": old_id, "tenant": tenant_id, "graph": graph_id},
         )
         await self._add_edge(
             ResolvedOp(
@@ -605,11 +632,12 @@ class GraphService:
         await self.session.execute(
             text("""
                 UPDATE cg_edges SET invalid_at = NOW(), updated_at = NOW()
-                WHERE graph_id = :graph AND invalid_at IS NULL
+                WHERE tenant_id = :tenant AND graph_id = :graph
+                  AND invalid_at IS NULL
                   AND (source_node_id = CAST(:id AS uuid)
                        OR target_node_id = CAST(:id AS uuid))
             """),
-            {"id": node_id, "graph": graph_id},
+            {"id": node_id, "tenant": tenant_id, "graph": graph_id},
         )
         return str(node_id)
 

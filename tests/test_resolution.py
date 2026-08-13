@@ -27,11 +27,13 @@ EMB = [0.0] * 1536
 
 
 def _svc(
-    candidates, *, canonical=None, verdict="distinct", config=None, title_match=None
+    candidates, *, canonical=None, verdict="distinct", config=None,
+    title_match=None, nominee=None,
 ):
     svc = ResolutionService(
         MagicMock(),
         MagicMock(),
+        tenant_id="t1",
         llm=MagicMock(),
         ontology=DEFAULT_ONTOLOGY,
         config=config or ResolutionConfig(),
@@ -39,9 +41,10 @@ def _svc(
     )
     svc._block_candidates = AsyncMock(return_value=candidates)
     svc._classify = AsyncMock(return_value=verdict)
-    # The in-graph exact-title lookup is a DB read; these tests exercise the
+    # The in-graph lexical lookup is a DB read; these tests exercise the
     # decision logic above it. Covered against real SQL in test_integration.
-    svc._match_by_title = AsyncMock(return_value=title_match)
+    # It returns (exact_id, fuzzy_nominee) — decisive and merely suggestive.
+    svc._match_by_title = AsyncMock(return_value=(title_match, nominee))
     return svc
 
 
@@ -171,6 +174,69 @@ class TestThresholds:
         )
         assert [o.op for o in ops] == ["ADD_NODE", OP_SUPERSEDE]
         assert ops[1].risk == "high", "retiring a claim must not auto-apply"
+
+
+class TestLexicalNomination:
+    """The gap between "cosine says nothing" and "these are obviously related".
+
+    A near-identical title whose summary is worded differently can score below
+    the adjudication band entirely — the embedded text is "title\\nsummary", so
+    the summary drags the pair apart. Without a lexical nomination those pairs
+    are never even considered, which is the cross-run duplicate the roster
+    exists to prevent and this catches when prevention failed.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_lexical_nominee_is_adjudicated_when_cosine_is_cold(self):
+        nominee = Candidate(
+            id="existing", score=0.0, title="Task Status Tracking",
+            type="entity/feature",
+        )
+        svc = _svc([], nominee=nominee, verdict="duplicate")
+        ops, real_id = await svc._resolve_one(
+            _node(title="Task Status Tracking Detail"), EMB, "g", CITATION, {}
+        )
+        assert [o.op for o in ops] == [OP_MERGE_NODE]
+        assert real_id == "existing"
+        svc._classify.assert_awaited(), "lexical overlap must be asked about"
+
+    @pytest.mark.asyncio
+    async def test_a_nominee_ruled_distinct_stays_two_nodes(self):
+        """The signal is a nomination, never a decision."""
+        nominee = Candidate(
+            id="existing", score=0.0, title="Login Screen", type="entity/screen"
+        )
+        svc = _svc([], nominee=nominee, verdict="distinct")
+        ops, real_id = await svc._resolve_one(
+            _node(title="Login Screen Detail", type_="entity/screen"),
+            EMB, "g", CITATION, {},
+        )
+        assert [o.op for o in ops] == ["ADD_NODE"]
+        assert real_id != "existing"
+
+    @pytest.mark.asyncio
+    async def test_a_vector_candidate_in_band_takes_precedence(self):
+        """Cosine evidence beats lexical evidence when both are present."""
+        svc = _svc(
+            [Candidate(id="vector", score=0.80, title="Status Tracking",
+                       type="entity/feature")],
+            nominee=Candidate(id="lexical", score=0.0, title="Status Tracking UI",
+                              type="entity/feature"),
+            verdict="duplicate",
+        )
+        _, real_id = await svc._resolve_one(
+            _node(title="Status Tracking UI"), EMB, "g", CITATION, {}
+        )
+        assert real_id == "vector"
+
+    @pytest.mark.asyncio
+    async def test_no_nominee_means_no_llm_call(self):
+        svc = _svc([])
+        ops, _ = await svc._resolve_one(
+            _node(title="Something Entirely New"), EMB, "g", CITATION, {}
+        )
+        assert [o.op for o in ops] == ["ADD_NODE"]
+        svc._classify.assert_not_awaited()
 
 
 class TestWithinRunDuplicates:

@@ -43,25 +43,30 @@ class RosterEntry:
 
 
 async def build_roster(
-    session: AsyncSession, graph_id: str, config: RosterConfig
+    session: AsyncSession, tenant_id: str, graph_id: str, config: RosterConfig
 ) -> list[RosterEntry]:
     """Existing titles for a graph, most reusable first.
 
     Entities lead: they are named again every time they are discussed, so they
     duplicate far more than one-off claims do.
+
+    Scoped by tenant as well as graph. The roster is the one read whose output
+    goes verbatim into a prompt, so an unscoped query here would not merely
+    leak another tenant's titles — it would invite the extractor to reuse them,
+    writing the leak into this tenant's graph as node titles of its own.
     """
     rows = (
         await session.execute(
             text("""
                 SELECT type, title, aliases
                 FROM cg_nodes
-                WHERE graph_id = :graph
+                WHERE tenant_id = :tenant AND graph_id = :graph
                   AND deleted_at IS NULL
                   AND status = 'active'
                 ORDER BY (kind = 'entity') DESC, updated_at DESC
                 LIMIT :limit
             """),
-            {"graph": graph_id, "limit": config.limit},
+            {"tenant": tenant_id, "graph": graph_id, "limit": config.limit},
         )
     ).fetchall()
     return [
@@ -100,13 +105,15 @@ def render_roster(entries: list[RosterEntry]) -> str:
 
 
 async def build_roster_block(
-    session: AsyncSession, graph_id: str, config: RosterConfig
+    session: AsyncSession, tenant_id: str, graph_id: str, config: RosterConfig
 ) -> str:
     """Best-effort roster. Never raises — extraction proceeds without it."""
     if not config.enabled:
         return ""
     try:
-        return render_roster(await build_roster(session, graph_id, config))
+        return render_roster(
+            await build_roster(session, tenant_id, graph_id, config)
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("Roster build failed for graph %s: %s", graph_id, exc)
         return ""

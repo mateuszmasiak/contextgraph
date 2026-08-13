@@ -97,11 +97,17 @@ class ContextGraph:
         stores and indexes the text without an LLM call, so ingestion stays
         available when your provider is not — and structuring can be re-run
         later against a better model or a corrected ontology.
+
+        The raw text is committed before any remote call is made. That is the
+        one durability guarantee this library offers: past the first commit,
+        every later failure costs derived data that can be rebuilt, and none of
+        them can cost the source. It is why ``add`` commits more than once.
         """
         async with self._sessions() as session:
-            source, _ = await IngestionService(
+            ingestion = IngestionService(
                 session, self.embedder, self.config.chunking
-            ).ingest(
+            )
+            source = await ingestion.capture(
                 tenant_id=tenant_id,
                 graph_id=graph_id,
                 origin=origin,
@@ -109,12 +115,38 @@ class ContextGraph:
                 metadata=metadata,
             )
             source_id = source.id
-            if not structure:
+            # Commit the evidence before spending a paid call on anything
+            # derived from it.
+            await session.commit()
+
+            try:
+                await ingestion.index(
+                    tenant_id=tenant_id,
+                    graph_id=graph_id,
+                    source_id=source_id,
+                    content=content,
+                )
                 await session.commit()
+            except Exception as exc:  # noqa: BLE001
+                # The source survives this, which is the entire point. Report
+                # it rather than proceeding: structuring needs the same
+                # embedder, so it would fail too and bury this error under a
+                # less specific one.
+                logger.warning(
+                    "Indexing failed for source %s; the text is stored and the "
+                    "source can be re-indexed: %s", source_id, exc,
+                )
+                await session.rollback()
+                return StructureResult(
+                    status="failed",
+                    source_id=str(source_id),
+                    error=f"Source stored but not indexed: {exc}",
+                )
+
+            if not structure:
                 return StructureResult(status="stored", source_id=str(source_id))
 
             if self.llm is None:
-                await session.commit()
                 return StructureResult(
                     status="stored",
                     source_id=str(source_id),
@@ -124,6 +156,8 @@ class ContextGraph:
             result = await structure_source(
                 session,
                 source_id,
+                tenant_id=tenant_id,
+                graph_id=graph_id,
                 embedder=self.embedder,
                 llm=self.llm,
                 ontology=self.ontology,
@@ -142,12 +176,17 @@ class ContextGraph:
 
         Safe to repeat: resolution folds re-extracted claims into the nodes
         they already produced rather than duplicating them.
+
+        Raises ``ScopeViolationError`` if the source belongs to another tenant
+        or graph — the id is supplied by the caller and proves nothing on its
+        own.
         """
         if self.llm is None:
             raise ValueError("restructure() requires an LLM")
         async with self._sessions() as session:
             result = await structure_source(
                 session, source_id,
+                tenant_id=tenant_id, graph_id=graph_id,
                 embedder=self.embedder, llm=self.llm, ontology=self.ontology,
                 config=self.config, meter=self.meter, canonical=self.canonical,
             )
@@ -163,8 +202,8 @@ class ContextGraph:
     ) -> GraphContext:
         """What the graph knows about a query, as a connected subgraph."""
         async with self._sessions() as session:
-            return await RetrievalService(session, self.embedder).retrieve_subgraph(
-                graph_id=graph_id, query=query, hops=hops,
+            return await self._reads(session, tenant_id, graph_id).retrieve_subgraph(
+                query=query, hops=hops,
                 top_k_nodes=top_k, max_nodes=max_nodes, min_score=min_score,
             )
 
@@ -174,8 +213,8 @@ class ContextGraph:
     ) -> list[SegmentHit]:
         """Verbatim source spans matching a query, with provenance."""
         async with self._sessions() as session:
-            return await RetrievalService(session, self.embedder).search_segments(
-                graph_id=graph_id, query=query, top_k=top_k, min_score=min_score,
+            return await self._reads(session, tenant_id, graph_id).search_segments(
+                query=query, top_k=top_k, min_score=min_score,
             )
 
     async def neighbors(
@@ -183,8 +222,8 @@ class ContextGraph:
     ) -> GraphContext:
         """Everything connected to a node — impact analysis."""
         async with self._sessions() as session:
-            return await RetrievalService(session, self.embedder).neighborhood(
-                graph_id=graph_id, node_id=node_id, hops=hops
+            return await self._reads(session, tenant_id, graph_id).neighborhood(
+                node_id=node_id, hops=hops
             )
 
     async def evidence(
@@ -192,16 +231,30 @@ class ContextGraph:
     ) -> list[dict[str, Any]]:
         """The source spans a claim rests on."""
         async with self._sessions() as session:
-            return await RetrievalService(session, self.embedder).evidence_for(
-                graph_id=graph_id, node_id=node_id
+            return await self._reads(session, tenant_id, graph_id).evidence_for(
+                node_id=node_id
             )
 
     async def conflicts(self, tenant_id: str, graph_id: str) -> list[dict[str, Any]]:
         """Contradictions the graph is holding open."""
         async with self._sessions() as session:
-            return await RetrievalService(session, self.embedder).conflicts(
-                graph_id=graph_id, open_question_type=self.ontology.open_question_type
+            return await self._reads(session, tenant_id, graph_id).conflicts(
+                open_question_type=self.ontology.open_question_type
             )
+
+    def _reads(
+        self, session: AsyncSession, tenant_id: str, graph_id: str
+    ) -> RetrievalService:
+        """A read service bound to this call's scope.
+
+        Every read goes through here so that scope is applied in one place. The
+        service takes both keys at construction and has no method that accepts
+        a different one, which is what makes "the caller passed a tenant but the
+        query only filtered by graph" unrepresentable rather than merely absent.
+        """
+        return RetrievalService(
+            session, self.embedder, tenant_id=tenant_id, graph_id=graph_id
+        )
 
     # -- govern -------------------------------------------------------------- #
 
@@ -300,6 +353,12 @@ class ContextGraph:
         Nodes with no embedding are the leading indicator: they are invisible
         to de-duplication and to retrieval, permanently, and they accumulate
         silently. Sources stuck pending mean structuring is not running at all.
+
+        ``sources_unindexed`` counts sources with no segments — text that was
+        captured while the embedder was unavailable. Those rows are the
+        deliberate outcome of preferring a retryable gap to a lost source, and
+        counting them is what keeps that a gap rather than a leak: nothing else
+        in the system would ever mention them.
         """
         async with self._sessions() as session:
             row = (
@@ -307,21 +366,32 @@ class ContextGraph:
                     text("""
                         SELECT
                           (SELECT count(*) FROM cg_nodes
-                             WHERE graph_id = :g AND deleted_at IS NULL),
+                             WHERE tenant_id = :t AND graph_id = :g
+                               AND deleted_at IS NULL),
                           (SELECT count(*) FROM cg_nodes
-                             WHERE graph_id = :g AND deleted_at IS NULL
+                             WHERE tenant_id = :t AND graph_id = :g
+                               AND deleted_at IS NULL
                                AND embedding IS NULL),
                           (SELECT count(*) FROM cg_edges
-                             WHERE graph_id = :g AND invalid_at IS NULL),
+                             WHERE tenant_id = :t AND graph_id = :g
+                               AND invalid_at IS NULL),
                           (SELECT count(*) FROM cg_sources
-                             WHERE graph_id = :g AND extraction_status = 'pending'),
+                             WHERE tenant_id = :t AND graph_id = :g
+                               AND extraction_status = 'pending'),
                           (SELECT count(*) FROM cg_sources
-                             WHERE graph_id = :g AND extraction_status = 'failed'),
+                             WHERE tenant_id = :t AND graph_id = :g
+                               AND extraction_status = 'failed'),
                           (SELECT count(*) FROM cg_changesets
-                             WHERE graph_id = :g
-                               AND status IN ('pending_review','partial'))
+                             WHERE tenant_id = :t AND graph_id = :g
+                               AND status IN ('pending_review','partial')),
+                          (SELECT count(*) FROM cg_sources src
+                             WHERE src.tenant_id = :t AND src.graph_id = :g
+                               AND coalesce(src.raw_content, '') <> ''
+                               AND NOT EXISTS (
+                                 SELECT 1 FROM cg_segments seg
+                                 WHERE seg.source_id = src.id))
                     """),
-                    {"g": graph_id},
+                    {"t": tenant_id, "g": graph_id},
                 )
             ).first()
             if row is None:  # scalar subqueries always return a row; be explicit
@@ -329,5 +399,6 @@ class ContextGraph:
             keys = (
                 "nodes", "nodes_without_embedding", "active_edges",
                 "sources_pending", "sources_failed", "changesets_awaiting_review",
+                "sources_unindexed",
             )
             return {k: int(row[i] or 0) for i, k in enumerate(keys)}

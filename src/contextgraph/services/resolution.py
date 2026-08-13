@@ -134,6 +134,7 @@ class ResolutionService:
         session: AsyncSession,
         embedder: Embedder,
         *,
+        tenant_id: str,
         llm: StructuredLLM | None = None,
         ontology: Ontology,
         config: ResolutionConfig,
@@ -141,6 +142,12 @@ class ResolutionService:
     ) -> None:
         self.session = session
         self.embedder = embedder
+        # Required, and bound for the life of the service. Candidate generation
+        # decides what a new claim MERGES INTO, so an unscoped lookup here is
+        # worse than a leaked read: it would fold this tenant's claim into
+        # another tenant's node, joining two graphs by a write that no later
+        # query can distinguish from a legitimate merge.
+        self.tenant_id = tenant_id
         self.llm = llm
         self.ontology = ontology
         self.config = config
@@ -240,7 +247,7 @@ class ResolutionService:
         # byte-identical titles and differently-worded summaries measured 0.798
         # on real data, well under any safe merge bar. Exact equality after
         # normalisation is decisive on its own and needs no threshold.
-        exact = await self._match_by_title(graph_id, node)
+        exact, lexical_nominee = await self._match_by_title(graph_id, node)
         if exact is not None:
             return (
                 [self._merge_op(exact, node, citation, branch="exact_title")],
@@ -269,6 +276,10 @@ class ResolutionService:
                 else None
             )
         )
+        # Nothing close enough by vector, but a same-type title overlaps enough
+        # to be worth asking about. Adjudicated, never merged directly.
+        if target is None:
+            target = lexical_nominee
         if target is not None:
             return await self._adjudicate(
                 node, embedding, citation, memo, key, target
@@ -429,38 +440,63 @@ class ResolutionService:
 
     async def _match_by_title(
         self, graph_id: str, node: ExtractedNode
-    ) -> str | None:
-        """An existing same-type node whose title or alias equals this one.
+    ) -> tuple[str | None, Candidate | None]:
+        """Lexical lookup over same-type nodes: ``(exact_id, nominee)``.
 
-        Compared after normalisation, in Python rather than SQL, so the
-        normalisation rules stay in one place — and so an alias match counts,
-        which is what lets a phrasing recorded by an earlier merge resolve the
-        next occurrence of that phrasing.
+        Two results from one scan, because the two are decided differently.
 
-        Scanning same-type rows is acceptable because the set is small by
-        construction; if a graph grows a type with tens of thousands of nodes,
-        add a generated normalised-title column and index it.
+        *Exact after normalisation* is decisive and merges on its own. An alias
+        counts as much as a title, which is what lets a phrasing recorded by an
+        earlier merge resolve the next occurrence of that phrasing.
+
+        *Token overlap* is only a nomination. "Task Status Tracking" against
+        "Task Status Tracking Detail" is 0.75 overlap and a real duplicate,
+        while plenty of pairs at the same overlap are siblings that must stay
+        apart — so the nominee goes to the adjudicator, which is biased toward
+        "distinct", and never merges on the lexical signal alone.
+
+        The nomination exists because the vector path cannot be relied on to
+        raise these: the embedded text is "title\\nsummary", so a near-identical
+        title with a differently-worded summary can score below ``related_low``
+        and never become a candidate at all. This scan sees every same-type
+        node, not just the vector top-k.
+
+        Compared in Python rather than SQL so the normalisation rules stay in
+        one place. Scanning same-type rows is acceptable because the set is
+        small by construction; if a graph grows a type with tens of thousands
+        of nodes, add a generated normalised-title column and index it.
         """
         target = normalize_title(node.title)
         if not target:
-            return None
+            return None, None
         rows = (
             await self.session.execute(
                 text("""
-                    SELECT id::text, title, aliases
+                    SELECT id::text, title, aliases,
+                           properties->>'summary'
                     FROM cg_nodes
-                    WHERE graph_id = :graph AND type = :type
+                    WHERE tenant_id = :tenant AND graph_id = :graph
+                      AND type = :type
                       AND status = 'active' AND deleted_at IS NULL
                     ORDER BY created_at ASC
                 """),
-                {"graph": graph_id, "type": node.type},
+                {"tenant": self.tenant_id, "graph": graph_id, "type": node.type},
             )
         ).fetchall()
+
+        nominee: Candidate | None = None
         for row in rows:
-            for candidate in [row[1], *(row[2] or [])]:
-                if normalize_title(candidate) == target:
-                    return str(row[0])
-        return None
+            surfaces = [row[1], *(row[2] or [])]
+            if any(normalize_title(s) == target for s in surfaces):
+                return str(row[0]), None
+            if nominee is None and any(
+                titles_match(node.title, s) for s in surfaces
+            ):
+                nominee = Candidate(
+                    id=str(row[0]), score=0.0, title=row[1], type=node.type,
+                    summary=row[3], aliases=list(row[2] or []),
+                )
+        return None, nominee
 
     async def _block_candidates(
         self, graph_id: str, kind: str, embedding: list[float]
@@ -492,7 +528,7 @@ class ResolutionService:
                            ) AS summary,
                            aliases
                     FROM cg_nodes
-                    WHERE graph_id = :graph
+                    WHERE tenant_id = :tenant AND graph_id = :graph
                       AND kind = :kind
                       AND status = 'active'
                       AND deleted_at IS NULL
@@ -501,8 +537,8 @@ class ResolutionService:
                     LIMIT :k
                 """),
                 {
-                    "emb": emb, "graph": graph_id, "kind": kind,
-                    "k": self.config.candidate_limit,
+                    "emb": emb, "tenant": self.tenant_id, "graph": graph_id,
+                    "kind": kind, "k": self.config.candidate_limit,
                 },
             )
         ).fetchall()

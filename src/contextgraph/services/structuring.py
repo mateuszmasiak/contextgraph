@@ -23,6 +23,7 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from contextgraph.config import Config
+from contextgraph.errors import ScopeViolationError
 from contextgraph.models import Changeset, GraphRun, GraphSource
 from contextgraph.ontology import Ontology
 from contextgraph.protocols import (
@@ -32,7 +33,7 @@ from contextgraph.protocols import (
     StructuredLLM,
 )
 from contextgraph.services.extraction import ExtractionService
-from contextgraph.services.graph import Actor, GraphService, compact_op
+from contextgraph.services.graph import Actor, GraphService
 from contextgraph.services.resolution import ResolutionService
 from contextgraph.services.roster import build_roster_block
 
@@ -74,6 +75,8 @@ async def structure_source(
     session: AsyncSession,
     source_id: UUID,
     *,
+    tenant_id: str,
+    graph_id: str,
     embedder: Embedder,
     llm: StructuredLLM,
     ontology: Ontology,
@@ -85,6 +88,15 @@ async def structure_source(
     source = await session.get(GraphSource, source_id)
     if source is None:
         return StructureResult(status="not_found", source_id=str(source_id))
+
+    # A source is addressed by a bare UUID, which carries no scope of its own.
+    # Callers that hand one in from outside (``restructure``) would otherwise be
+    # able to re-extract any tenant's source and write the results into the
+    # caller's own graph — a read leak and a write, from one guessed id.
+    if source.tenant_id != tenant_id or source.graph_id != graph_id:
+        raise ScopeViolationError(
+            f"Source {source_id} belongs to another tenant or graph"
+        )
 
     actor = actor or Actor(kind="agent")
     source.extraction_status = "running"
@@ -108,7 +120,9 @@ async def structure_source(
         # SAVEPOINT: a structuring failure must not take the caller's
         # transaction — or the source row — down with it.
         async with session.begin_nested():
-            roster = await build_roster_block(session, source.graph_id, config.roster)
+            roster = await build_roster_block(
+                session, source.tenant_id, source.graph_id, config.roster
+            )
 
             extractor = ExtractionService(
                 llm, ontology=ontology, config=config.extraction
@@ -120,8 +134,8 @@ async def structure_source(
                 spend.add(extracted.model, usage)
 
             resolver = ResolutionService(
-                session, embedder, llm=llm, ontology=ontology,
-                config=config.resolution, canonical=canonical,
+                session, embedder, tenant_id=source.tenant_id, llm=llm,
+                ontology=ontology, config=config.resolution, canonical=canonical,
             )
             ops = await resolver.resolve(
                 graph_id=source.graph_id,
@@ -137,6 +151,7 @@ async def structure_source(
                 ops,
                 tenant_id=source.tenant_id,
                 graph_id=source.graph_id,
+                actor=actor,
                 run_id=run.id,
             )
 
@@ -145,7 +160,10 @@ async def structure_source(
                 graph_id=source.graph_id,
                 run_id=run.id,
                 status="partial" if applied.gated_ops else "applied",
-                ops=[compact_op(o) for o in ops],
+                # The server's classification, not the resolver's proposal.
+                # Reviewers act on this row, so it has to be the same verdict
+                # the gate acted on.
+                ops=applied.classified_ops,
                 origin="structuring",
                 actor_kind=actor.kind,
                 actor_id=actor.id,

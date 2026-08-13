@@ -5,7 +5,14 @@ available, because losing the source is the one unrecoverable failure in the
 pipeline. Everything derived from it — nodes, edges, conflicts — can be rebuilt
 by re-running structuring. The raw text cannot be rebuilt from anything.
 
-So this does exactly two things: store the text, and embed its segments.
+So this does exactly two things, and they are **two methods rather than one**:
+``capture`` stores the text, ``index`` embeds its segments. The split is the
+whole point. Embedding calls a paid remote service that fails routinely, and
+while both steps shared one uncommitted transaction, an embedding outage rolled
+the source row back with it — the pipeline losing the one artefact it exists to
+never lose, at exactly the moment it was under stress. The caller commits
+between the two, so a failure past that point costs an embedding call and
+leaves a row that can be indexed again.
 """
 
 from __future__ import annotations
@@ -32,7 +39,7 @@ class IngestionService:
         self.embedder = embedder
         self.config = config
 
-    async def ingest(
+    async def capture(
         self,
         *,
         tenant_id: str,
@@ -42,7 +49,10 @@ class IngestionService:
         metadata: dict[str, Any] | None = None,
         external_ref: dict[str, Any] | None = None,
         run_id: UUID | None = None,
-    ) -> tuple[GraphSource, int]:
+    ) -> GraphSource:
+        """Store the raw text. Touches nothing remote, so it cannot fail on a
+        provider outage — the caller should commit before doing anything that
+        can."""
         source = GraphSource(
             tenant_id=tenant_id,
             graph_id=graph_id,
@@ -55,9 +65,32 @@ class IngestionService:
         )
         self.session.add(source)
         await self.session.flush()
+        return source
 
-        count = await self._segment_and_embed(tenant_id, graph_id, source.id, content)
-        return source, count
+    async def index(
+        self,
+        *,
+        tenant_id: str,
+        graph_id: str,
+        source_id: UUID,
+        content: str,
+    ) -> int:
+        """Chunk and embed a captured source. Raises on embedder failure.
+
+        Raising is correct and the source is already safe: re-running this is
+        cheap, whereas a source indexed with a fabricated vector is corrupt in
+        a way nothing downstream can detect.
+
+        Takes plain values rather than the ``GraphSource`` on purpose. The
+        caller commits between ``capture`` and this call, and under the default
+        ``expire_on_commit=True`` every attribute of that instance is then
+        expired — so reading one back would emit IO from what looks like a
+        plain attribute access, which under asyncio is a ``MissingGreenlet``
+        crash rather than a lazy load.
+        """
+        return await self._segment_and_embed(
+            tenant_id, graph_id, source_id, content
+        )
 
     async def _segment_and_embed(
         self, tenant_id: str, graph_id: str, source_id: UUID, content: str

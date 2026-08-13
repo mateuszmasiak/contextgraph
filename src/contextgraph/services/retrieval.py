@@ -103,12 +103,37 @@ class GraphContext:
 
 
 class RetrievalService:
-    def __init__(self, session: AsyncSession, embedder: Embedder) -> None:
+    """Reads, bound to exactly one tenant and one graph.
+
+    Scope is taken at construction rather than per method, and every statement
+    below filters on both columns. That is not redundancy with the caller's own
+    checks: ``graph_id`` alone is not an isolation boundary, because nothing
+    stops two tenants choosing the same graph name — and something will, since
+    the MCP server's own default is the literal string ``"default"``. A read
+    scoped by graph alone then returns another tenant's rows, with no error and
+    nothing in the result to indicate it happened.
+    """
+
+    def __init__(
+        self,
+        session: AsyncSession,
+        embedder: Embedder,
+        *,
+        tenant_id: str,
+        graph_id: str,
+    ) -> None:
         self.session = session
         self.embedder = embedder
+        self.tenant_id = tenant_id
+        self.graph_id = graph_id
+
+    @property
+    def _scope(self) -> dict[str, str]:
+        """Bind parameters every scoped statement here spreads into its params."""
+        return {"tenant": self.tenant_id, "graph": self.graph_id}
 
     async def search_segments(
-        self, *, graph_id: str, query: str, top_k: int = 10,
+        self, *, query: str, top_k: int = 10,
         min_score: float | None = None,
     ) -> list[SegmentHit]:
         """Vector search over source spans.
@@ -126,12 +151,19 @@ class RetrievalService:
                            1 - (s.embedding <=> CAST(:emb AS vector)) AS score,
                            src.origin
                     FROM cg_segments s
-                    JOIN cg_sources src ON src.id = s.source_id
-                    WHERE s.graph_id = :graph AND s.embedding IS NOT NULL
+                    -- The join is scoped too. Segment and source scope agree in
+                    -- any row this library wrote, but the join must not be the
+                    -- one place that trusts that.
+                    JOIN cg_sources src
+                      ON src.id = s.source_id
+                     AND src.tenant_id = :tenant
+                     AND src.graph_id = :graph
+                    WHERE s.tenant_id = :tenant AND s.graph_id = :graph
+                      AND s.embedding IS NOT NULL
                     ORDER BY s.embedding <=> CAST(:emb AS vector)
                     LIMIT :k
                 """),
-                {"emb": emb, "graph": graph_id, "k": top_k},
+                {"emb": emb, **self._scope, "k": top_k},
             )
         ).fetchall()
         hits = [
@@ -146,7 +178,7 @@ class RetrievalService:
         return hits
 
     async def retrieve_subgraph(
-        self, *, graph_id: str, query: str, top_k_nodes: int = 8,
+        self, *, query: str, top_k_nodes: int = 8,
         hops: int = 1, edge_types: list[str] | None = None, max_nodes: int = 30,
         min_score: float | None = None,
     ) -> GraphContext:
@@ -159,12 +191,13 @@ class RetrievalService:
                     SELECT id::text, kind, type, title, properties,
                            1 - (embedding <=> CAST(:emb AS vector)) AS score
                     FROM cg_nodes
-                    WHERE graph_id = :graph AND status = 'active'
+                    WHERE tenant_id = :tenant AND graph_id = :graph
+                      AND status = 'active'
                       AND deleted_at IS NULL AND embedding IS NOT NULL
                     ORDER BY embedding <=> CAST(:emb AS vector)
                     LIMIT :k
                 """),
-                {"emb": emb, "graph": graph_id, "k": top_k_nodes},
+                {"emb": emb, **self._scope, "k": top_k_nodes},
             )
         ).fetchall()
         seeds = {
@@ -177,31 +210,30 @@ class RetrievalService:
         }
         if not seeds:
             return GraphContext(nodes=[], edges=[])
-        return await self._grow(graph_id, seeds, hops, edge_types, max_nodes)
+        return await self._grow(seeds, hops, edge_types, max_nodes)
 
     async def neighborhood(
-        self, *, graph_id: str, node_id: str, hops: int = 1,
+        self, *, node_id: str, hops: int = 1,
         edge_types: list[str] | None = None, max_nodes: int = 30,
     ) -> GraphContext:
-        details = await self._node_details(graph_id, [node_id])
+        details = await self._node_details([node_id])
         if not details:
             return GraphContext(nodes=[], edges=[])
         return await self._grow(
-            graph_id, {d["id"]: {**d, "score": 1.0} for d in details},
+            {d["id"]: {**d, "score": 1.0} for d in details},
             hops, edge_types, max_nodes,
         )
 
-    async def evidence_for(
-        self, *, graph_id: str, node_id: str
-    ) -> list[dict[str, Any]]:
+    async def evidence_for(self, *, node_id: str) -> list[dict[str, Any]]:
         """The source spans a node's claim rests on."""
         row = (
             await self.session.execute(
                 text("""
                     SELECT properties->'citations' FROM cg_nodes
-                    WHERE id = CAST(:id AS uuid) AND graph_id = :graph
+                    WHERE id = CAST(:id AS uuid)
+                      AND tenant_id = :tenant AND graph_id = :graph
                 """),
-                {"id": node_id, "graph": graph_id},
+                {"id": node_id, **self._scope},
             )
         ).first()
         citations = (row[0] if row else None) or []
@@ -214,9 +246,10 @@ class RetrievalService:
                     SELECT id::text, origin, left(coalesce(raw_content,''), 2000),
                            source_metadata, created_at
                     FROM cg_sources
-                    WHERE id = ANY(CAST(:ids AS uuid[])) AND graph_id = :graph
+                    WHERE id = ANY(CAST(:ids AS uuid[]))
+                      AND tenant_id = :tenant AND graph_id = :graph
                 """),
-                {"ids": source_ids, "graph": graph_id},
+                {"ids": source_ids, **self._scope},
             )
         ).fetchall()
         return [
@@ -228,7 +261,7 @@ class RetrievalService:
         ]
 
     async def conflicts(
-        self, *, graph_id: str, open_question_type: str
+        self, *, open_question_type: str
     ) -> list[dict[str, Any]]:
         rows = (
             await self.session.execute(
@@ -237,11 +270,12 @@ class RetrievalService:
                            coalesce((properties->>'resolved')::boolean, false),
                            created_at
                     FROM cg_nodes
-                    WHERE graph_id = :graph AND type = :oq
+                    WHERE tenant_id = :tenant AND graph_id = :graph
+                      AND type = :oq
                       AND status = 'active' AND deleted_at IS NULL
                     ORDER BY created_at DESC
                 """),
-                {"graph": graph_id, "oq": open_question_type},
+                {**self._scope, "oq": open_question_type},
             )
         ).fetchall()
         return [
@@ -256,7 +290,7 @@ class RetrievalService:
     # -- expansion ----------------------------------------------------------- #
 
     async def _grow(
-        self, graph_id: str, seeds: dict[str, dict[str, Any]], hops: int,
+        self, seeds: dict[str, dict[str, Any]], hops: int,
         edge_types: list[str] | None, max_nodes: int,
     ) -> GraphContext:
         collected: dict[str, dict[str, Any] | None] = dict(seeds)
@@ -267,7 +301,7 @@ class RetrievalService:
         for _ in range(max(0, hops)):
             if not frontier or len(collected) >= max_nodes:
                 break
-            rows = await self._edges_touching(graph_id, frontier, edge_types)
+            rows = await self._edges_touching(frontier, edge_types)
             new_frontier: list[str] = []
             for src, tgt, etype in rows:
                 key = (src, tgt, etype)
@@ -284,7 +318,7 @@ class RetrievalService:
 
         missing = [nid for nid, v in collected.items() if v is None]
         if missing:
-            for d in await self._node_details(graph_id, missing):
+            for d in await self._node_details(missing):
                 collected[d["id"]] = d
 
         nodes = [v for v in collected.values() if v]
@@ -299,26 +333,24 @@ class RetrievalService:
         return GraphContext(nodes=nodes, edges=edges_out)
 
     async def _edges_touching(
-        self, graph_id: str, node_ids: list[str], edge_types: list[str] | None
+        self, node_ids: list[str], edge_types: list[str] | None
     ) -> list[tuple[str, str, str]]:
         sql = """
             SELECT source_node_id::text, target_node_id::text, type
             FROM cg_edges
-            WHERE graph_id = :graph
+            WHERE tenant_id = :tenant AND graph_id = :graph
               AND invalid_at IS NULL
               AND (source_node_id = ANY(CAST(:ids AS uuid[]))
                    OR target_node_id = ANY(CAST(:ids AS uuid[])))
         """
-        params: dict[str, Any] = {"graph": graph_id, "ids": node_ids}
+        params: dict[str, Any] = {**self._scope, "ids": node_ids}
         if edge_types:
             sql += " AND type = ANY(:etypes)"
             params["etypes"] = edge_types
         rows = (await self.session.execute(text(sql), params)).fetchall()
         return [(r[0], r[1], r[2]) for r in rows]
 
-    async def _node_details(
-        self, graph_id: str, node_ids: list[str]
-    ) -> list[dict[str, Any]]:
+    async def _node_details(self, node_ids: list[str]) -> list[dict[str, Any]]:
         if not node_ids:
             return []
         rows = (
@@ -326,10 +358,11 @@ class RetrievalService:
                 text("""
                     SELECT id::text, kind, type, title, properties, status, confidence
                     FROM cg_nodes
-                    WHERE id = ANY(CAST(:ids AS uuid[])) AND graph_id = :graph
+                    WHERE id = ANY(CAST(:ids AS uuid[]))
+                      AND tenant_id = :tenant AND graph_id = :graph
                       AND deleted_at IS NULL AND status = 'active'
                 """),
-                {"ids": node_ids, "graph": graph_id},
+                {"ids": node_ids, **self._scope},
             )
         ).fetchall()
         return [
