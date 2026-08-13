@@ -1,0 +1,37 @@
+# Runs the fast half of CI locally. The integration suite is deliberately not
+# here: it needs a live Postgres, and a hook that fails when Docker is not
+# running teaches people to pass --no-verify.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=1024"]
+      - id: detect-private-key
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.4
+    hooks:
+      - id: ruff
+        args: ["--fix"]
+      - id: ruff-format
+        # Format checking only. The repository is hand-formatted to a 90-column
+        # measure that the formatter does not reproduce, and reflowing it would
+        # bury the next real diff under thousands of whitespace lines.
+        stages: [manual]
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.18.2
+    hooks:
+      - id: mypy
+        files: ^src/
+        additional_dependencies:
+          - "sqlalchemy[asyncio]>=2.0"
+          - "pydantic>=2"

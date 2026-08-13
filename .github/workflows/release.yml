@@ -1,0 +1,109 @@
+name: Release
+
+# Tag-triggered, and it publishes to PyPI. There is no automatic publish on
+# push to main: a release is a decision, and PyPI uploads cannot be replaced
+# once made.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Where to publish"
+        required: true
+        default: testpypi
+        type: choice
+        options: [testpypi, pypi]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Check the tag matches the packaged version
+        # A tag that disagrees with pyproject publishes a version nobody can
+        # find in git. Caught here rather than by a user reading the changelog.
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          pip install tomli
+          TAG="${GITHUB_REF#refs/tags/v}"
+          PKG=$(python -c "import tomli;print(tomli.load(open('pyproject.toml','rb'))['project']['version'])")
+          echo "tag=$TAG packaged=$PKG"
+          [ "$TAG" = "$PKG" ] || { echo "::error::tag v$TAG != pyproject version $PKG"; exit 1; }
+
+      - name: Build
+        run: |
+          pip install build twine
+          python -m build
+          twine check --strict dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish-testpypi:
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/contextgraph
+    permissions:
+      # Trusted publishing: OIDC instead of a long-lived API token in secrets.
+      # Configure the publisher at https://pypi.org/manage/account/publishing/
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  publish-pypi:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
+    runs-on: ubuntu-latest
+    environment:
+      # Add a required reviewer to this environment in repository settings to
+      # make every publish a deliberate, approved action.
+      name: pypi
+      url: https://pypi.org/p/contextgraph
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    needs: publish-pypi
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          name: dist
+          path: dist/
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF#refs/tags/}" dist/* \
+            --title "${GITHUB_REF#refs/tags/}" \
+            --generate-notes

@@ -2,13 +2,37 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
+  lint:
+    name: lint & types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: pip install -e ".[all,dev]"
+
+      - name: Ruff
+        run: ruff check --output-format=github .
+
+      - name: Mypy
+        run: mypy src
+
   test:
     name: py${{ matrix.python-version }}
     runs-on: ubuntu-latest
@@ -39,29 +63,79 @@ jobs:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/contextgraph_test
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
+          cache: pip
 
       - name: Install
+        run: pip install -e ".[all,dev]" pytest-cov
+
+      - name: Apply migrations
+        run: alembic -c alembic.ini upgrade head
+
+      - name: Migration round-trip
+        # A downgrade nobody runs is a downgrade that does not work. This also
+        # catches an upgrade that is not re-runnable against a partially built
+        # database, which is the state a failed deploy actually leaves behind.
         run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[all,dev]"
-
-      - name: Ruff
-        run: ruff check .
-
-      - name: Mypy
-        run: mypy src
+          alembic -c alembic.ini downgrade base
+          alembic -c alembic.ini upgrade head
 
       - name: Unit tests
         # Exit 5 is "collected nothing", which is not a failure: the default
-        # -m 'not integration' selection can legitimately be empty, and so can
-        # tests/ on a fresh checkout. Every other non-zero code still fails.
-        run: pytest || [ $? -eq 5 ]
+        # -m 'not integration' selection can legitimately be empty. Every other
+        # non-zero code still fails.
+        run: pytest --cov=contextgraph --cov-report=xml --cov-report=term-missing || [ $? -eq 5 ]
 
       - name: Integration tests
         # The command-line -m overrides the deselection in pyproject.
-        run: pytest -m integration || [ $? -eq 5 ]
+        run: pytest -m integration --cov=contextgraph --cov-append --cov-report=xml || [ $? -eq 5 ]
+
+      - name: Upload coverage
+        if: matrix.python-version == '3.12'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.xml
+          if-no-files-found: warn
+
+  build:
+    name: build & verify metadata
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Build sdist and wheel
+        run: |
+          pip install build twine
+          python -m build
+
+      - name: Check package metadata
+        # Catches the README rendering badly on PyPI, which is only visible
+        # after publishing otherwise — and a release cannot be re-uploaded.
+        run: twine check --strict dist/*
+
+      - name: Verify the wheel imports without any extras
+        # Every provider SDK enters through a Protocol, so the base install must
+        # work with none of them present. This is the test for that claim.
+        run: |
+          python -m venv /tmp/bare
+          /tmp/bare/bin/pip install dist/*.whl
+          /tmp/bare/bin/python -c "
+          import contextgraph
+          from contextgraph import ContextGraph, Ontology, Config
+          print('base install imports cleanly:', contextgraph.__version__)
+          "
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/

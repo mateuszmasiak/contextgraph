@@ -1,0 +1,12 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/mateuszmasiak/contextgraph/security/advisories/new
+    about: >
+      Report privately. Anything that could cross a tenant boundary or bypass
+      the review gate belongs here, not in a public issue.
+  - name: Question or design discussion
+    url: https://github.com/mateuszmasiak/contextgraph/discussions
+    about: >
+      For "how do I model this", "should I implement a CanonicalResolver", and
+      anything about the measured thresholds.

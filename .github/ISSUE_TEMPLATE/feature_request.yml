@@ -1,0 +1,52 @@
+name: Feature request
+description: Propose something the library should do
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing, please check the **deliberate non-features** section of
+        [CONTRIBUTING.md](https://github.com/mateuszmasiak/contextgraph/blob/main/CONTRIBUTING.md).
+        Deep traversal, an `ivfflat` index, auto-resolving contradictions and
+        inferring scope from ambient state were each considered and declined for
+        a stated reason. Proposals to revisit them are welcome — they just need
+        to engage with the reason.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you unable to do today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+      description: What should happen instead?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: seam
+    attributes:
+      label: Could this be done today through an existing seam?
+      description: >
+        The four Protocols (Embedder, StructuredLLM, Meter, CanonicalResolver)
+        and a custom Ontology cover a lot of customisation without a library
+        change. See docs/extending.md.
+      options:
+        - "No — it needs a change inside the library"
+        - "Maybe — I am not sure which seam applies"
+        - "Yes, but the seam is awkward and should be improved"
+    validations:
+      required: true
+
+  - type: textarea
+    id: invariants
+    attributes:
+      label: Interaction with the invariants
+      description: >
+        Does this touch merging, embedding failure, deletion, tenant scoping or
+        the write gate? If so, how does the proposal keep the invariant intact?

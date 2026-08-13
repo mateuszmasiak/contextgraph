@@ -1,0 +1,31 @@
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      # One PR for the routine churn. The provider SDKs move constantly and
+      # individually reviewing each patch bump is how a repo trains its
+      # maintainer to rubber-stamp Dependabot.
+      dev-tooling:
+        patterns: ["ruff", "mypy", "pytest*", "pre-commit", "alembic"]
+      providers:
+        patterns: ["openai", "anthropic", "langchain*", "mcp"]
+    ignore:
+      # Majors change behaviour that this library depends on precisely — the
+      # SQLAlchemy async engine, pgvector's operator classes. Those get read,
+      # not merged on a schedule.
+      - dependency-name: "sqlalchemy"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "pgvector"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    groups:
+      actions:
+        patterns: ["*"]

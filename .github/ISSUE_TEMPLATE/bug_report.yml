@@ -1,0 +1,79 @@
+name: Bug report
+description: Something behaves differently from what the docs say
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file this.
+
+        If the bug is a **security** issue — anything that could let one tenant
+        read or write another's data, or bypass the review gate — please do not
+        file it here. Use a [private advisory](https://github.com/mateuszmasiak/contextgraph/security/advisories/new)
+        instead.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you observe, and what did you expect instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: >
+        The smallest code that shows the problem. If it involves resolution
+        decisions (merging, de-duplication), please include the node titles,
+        types and summaries involved — the decision depends on all three.
+      render: python
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: contextgraph version
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      placeholder: "3.12.1"
+    validations:
+      required: true
+
+  - type: input
+    id: postgres
+    attributes:
+      label: Postgres and pgvector version
+      placeholder: "pg16, pgvector 0.7.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: providers
+    attributes:
+      label: Which model providers are involved?
+      multiple: true
+      options:
+        - OpenAI embeddings
+        - Anthropic (extraction/adjudication)
+        - OpenAI (extraction/adjudication)
+        - A custom Embedder
+        - A custom StructuredLLM
+        - None / not relevant
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or traceback
+      description: >
+        Please redact API keys, tenant identifiers and any source content you
+        would not want public.
+      render: shell
