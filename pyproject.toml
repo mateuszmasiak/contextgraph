@@ -52,7 +52,13 @@ openai = ["openai>=1.0"]
 # reference StructuredLLM; the raw SDK is still needed for token usage, which
 # the structured wrapper alone does not surface (see protocols.StructuredLLM).
 anthropic = ["anthropic>=0.40", "langchain-anthropic>=0.3"]
-mcp = ["mcp>=1.0"]
+# Upper-bounded deliberately. mcp 2.0 is a rewrite, not a bump: the
+# `@server.list_tools()` / `@server.call_tool()` decorators this server is built
+# on do not exist there, and `mcp.server.fastmcp` moved. Left open, `>=1.0`
+# resolves to 2.x and `contextgraph-mcp` fails at import — a broken entry point
+# for anyone installing today. Porting is tracked; until then this pin is the
+# honest statement of what is actually supported.
+mcp = ["mcp>=1.0,<2"]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
@@ -132,6 +138,11 @@ strict_equality = true
 [[tool.mypy.overrides]]
 # Optional provider SDKs and untyped deps. These are installed only via extras,
 # so a base-install type check must not fail on their absence.
+#
+# NOTE: this suppresses *missing* imports, not errors against a package that IS
+# installed. A contributor without the extras therefore gets a weaker check than
+# CI, which installs [all] — exactly how an incompatible `mcp` major reached
+# main. Run `pip install -e ".[all,dev]"` before trusting a local mypy run.
 module = [
     "openai.*",
     "langchain_openai.*",

@@ -178,6 +178,54 @@ class TestErrorHandling:
         assert await server.call("conflicts", None) == "No open contradictions."
 
 
+class TestTheSdkContract:
+    """The symbols serve_stdio() binds to, asserted against the real SDK.
+
+    serve_stdio is the one place this package touches the MCP SDK, and it is
+    never exercised by a unit test — it opens a stdio transport and blocks. So
+    an incompatible SDK release breaks the `contextgraph-mcp` entry point at
+    import time, with nothing in the suite going red.
+
+    That is not hypothetical: mcp 2.0 removed the decorators below, and the
+    `[mcp]` extra is upper-bounded because of it. This test is what makes the
+    bound falsifiable rather than a comment.
+    """
+
+    def test_the_server_api_serve_stdio_binds_to_exists(self):
+        mcp_server = pytest.importorskip(
+            "mcp.server", reason="the [mcp] extra is not installed"
+        )
+        server = mcp_server.Server("contextgraph")
+        for decorator in ("list_tools", "call_tool"):
+            assert hasattr(server, decorator), (
+                f"mcp.server.Server has no {decorator!r} — serve_stdio() cannot "
+                f"bind its handlers. The [mcp] extra needs its bound revisited."
+            )
+        assert hasattr(server, "create_initialization_options")
+
+    def test_the_stdio_transport_is_importable(self):
+        pytest.importorskip(
+            "mcp.server.stdio", reason="the [mcp] extra is not installed"
+        )
+
+    def test_tool_accepts_the_schema_key_the_tool_table_uses(self):
+        """TOOLS declares `inputSchema`; the SDK model must accept that spelling.
+
+        mcp 2.0 renamed the field to `input_schema`, keeping `inputSchema` as a
+        pydantic alias — so this passes on both. It fails loudly if a future
+        release drops the alias.
+        """
+        types = pytest.importorskip(
+            "mcp.types", reason="the [mcp] extra is not installed"
+        )
+        tool = types.Tool(
+            name=TOOLS[0]["name"],
+            description=TOOLS[0]["description"],
+            inputSchema=TOOLS[0]["inputSchema"],
+        )
+        assert tool.name == TOOLS[0]["name"]
+
+
 class TestToolSchemas:
     def test_every_declared_tool_has_a_handler(self):
         server, _ = _server()

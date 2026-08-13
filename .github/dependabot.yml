@@ -15,11 +15,14 @@ updates:
         patterns: ["openai", "anthropic", "langchain*", "mcp"]
     ignore:
       # Majors change behaviour that this library depends on precisely — the
-      # SQLAlchemy async engine, pgvector's operator classes. Those get read,
-      # not merged on a schedule.
+      # SQLAlchemy async engine, pgvector's operator classes, and the MCP
+      # server API (2.0 dropped the decorators this server is built on). Those
+      # get read and ported, not merged on a schedule.
       - dependency-name: "sqlalchemy"
         update-types: ["version-update:semver-major"]
       - dependency-name: "pgvector"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "mcp"
         update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "github-actions"

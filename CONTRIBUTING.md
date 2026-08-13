@@ -84,6 +84,12 @@ pytest -m integration
 ruff check . && mypy src
 ```
 
+Install the `[all]` extra before trusting a local `mypy` run. The optional
+provider SDKs are under `ignore_missing_imports`, which suppresses errors about
+a package being *absent* — not errors against one that is installed. Without the
+extras your local check is strictly weaker than CI's, which is exactly how an
+incompatible `mcp` major version once reached `main`.
+
 No test in this repository calls a real model provider. The suite uses a
 deterministic `FakeEmbedder` whose similarity is *controllable* (see
 `tests/conftest.py`), which is the only way to assert on threshold behaviour
